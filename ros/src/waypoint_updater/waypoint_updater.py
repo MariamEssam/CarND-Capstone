@@ -53,6 +53,7 @@ class WaypointUpdater(object):
 
         self.stopline_wp_idx = -1
         self.base_lane = None
+        self.traffic_cb_count = 1
 
         self.loop()
         #rospy.spin()
@@ -113,15 +114,15 @@ class WaypointUpdater(object):
         return lane
 
     def decel_vel(self, x):        
-        vel = 1/(1+math.exp(-x)) - 0.7 
+        vel = 1/(1+math.exp(-x)) - 0.4
         if vel < 0:
             vel = 0
         return vel
 
     def decelerate_waypoints(self, waypoints, closest_idx):
         temp = []
-        dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
-        dist_car_to_wp = dl(self.base_waypoints.waypoints[closest_idx].pose.pose.position, self.pose.pose.position)        
+        # dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
+        # dist_car_to_wp = dl(self.base_waypoints.waypoints[closest_idx].pose.pose.position, self.pose.pose.position)        
 
         for i, wp in enumerate(waypoints):
             p = Waypoint()
@@ -137,8 +138,12 @@ class WaypointUpdater(object):
 
             wp_vel = wp.twist.twist.linear.x
             # if the car's position far from the closest waypoint, set a lower velocity.
-            if stop_idx <= 5:                
-                wp_vel = min(wp_vel, self.decel_vel(vel))
+            if stop_idx <= 5 and self.current_vel <= 5:
+                temp_vel =  self.decel_vel(vel)
+                if   stop_idx in (1, 2):
+                    temp_vel = 0
+
+                wp_vel = min(wp_vel, temp_vel)
 
             p.twist.twist.linear.x = min(vel, wp_vel)
             temp.append(p)
@@ -157,7 +162,12 @@ class WaypointUpdater(object):
             self.waypoint_tree = KDTree(self.waypoints_2d)
 
     def traffic_cb(self, msg):
-        self.stopline_wp_idx = msg.data
+        # add a red traffic light latency
+        if (self.stopline_wp_idx != -1) and (msg.data == -1) and (self.traffic_cb_count <= 6 ):
+            self.traffic_cb_count += 1
+        else:
+            self.traffic_cb_count = 1
+            self.stopline_wp_idx = msg.data
 
     def obstacle_cb(self, msg):
         # TODO: Callback for /obstacle_waypoint message. We will implement it later
