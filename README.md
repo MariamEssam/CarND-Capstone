@@ -20,7 +20,7 @@ The sections within the video:
 * **bottom right**: simulator 
 
 The following video shows how our code runs a real self driving car with traffic light detection.
-[![Real Sefl-Driving Car](https://img.youtube.com/vi/bWpKIwP68RE/0.jpg)](https://www.youtube.com/watch?v=bWpKIwP68RE)
+[![Real Sefl-Driving Car](https://img.youtube.com/vi/45m1u2on1YY/0.jpg)](https://www.youtube.com/watch?v=45m1u2on1YY)
 
 
 *Note: Find the latest version of this project on
