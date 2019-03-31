@@ -11,6 +11,10 @@ from sensor_msgs.msg import PointCloud2
 
 from scipy.spatial import KDTree
 import numpy as np
+from scipy.interpolate import spline
+import tf
+from geometry_msgs.msg import Quaternion
+import copy
 
 '''
 This node will publish waypoints from the car's current position to some `x` distance ahead.
@@ -52,9 +56,9 @@ class WaypointUpdater(object):
         self.current_vel = 0
 
         self.stopline_wp_idx = -1
-        self.base_lane = None
-        self.traffic_cb_count = 1
-
+        self.base_lane = None        
+        self.red_light_lane_wps = None
+        
         self.loop()
         #rospy.spin()
 
@@ -108,47 +112,112 @@ class WaypointUpdater(object):
 
         if self.stopline_wp_idx == -1 or (self.stopline_wp_idx >= farthest_idx):
             lane.waypoints = base_waypoints
+            self.red_light_lane_wps = None
         else:
             lane.waypoints = self.decelerate_waypoints(base_waypoints, closest_idx)
 
         return lane
 
-    def decel_vel(self, x):        
-        vel = 1/(1+math.exp(-x)) - 0.7
-        if vel < 0:
-            vel = 0
-        return vel
+    def quaternion_from_yaw(self, yaw):
+        return tf.transformations.quaternion_from_euler(0., 0., yaw)
 
-    def decelerate_waypoints(self, waypoints, closest_idx):
-        temp = []
-        # dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
-        # dist_car_to_wp = dl(self.base_waypoints.waypoints[closest_idx].pose.pose.position, self.pose.pose.position)        
+    def distance_wp(self, p1, p2):
+        x, y, z = p1.x - p2.x, p1.y - p2.y, p1.z - p2.z
+        return math.sqrt(x*x + y*y + z*z)
 
-        for i, wp in enumerate(waypoints):
-            p = Waypoint()
-            p.pose = wp.pose
-            
-            stop_idx = max(self.stopline_wp_idx - closest_idx -2, 0) # Two waypoints back from line so front of car at line
-            dist = self.distance(waypoints, i, stop_idx)
+    def decelerate(self, waypoints):
+        last = waypoints[-1]
+        last.twist.twist.linear.x = 0.
 
-            # TODO we could use another algorithm. see 12. Full Waypoint Walkthrough 7:00
+        for wp in waypoints[:-1][::-1]:
+            dist = self.distance_wp(wp.pose.pose.position, last.pose.pose.position)
             vel = math.sqrt(2 * MAX_DECEL * dist)
             if vel < 1.:
                 vel = 0.
+            wp.twist.twist.linear.x = min(vel, wp.twist.twist.linear.x)
+        return waypoints
 
-            wp_vel = wp.twist.twist.linear.x
-            # if the car's position far from the closest waypoint, set a lower velocity.
-            if stop_idx <= 5:
-                temp_vel =  self.decel_vel(vel)
-                if   stop_idx in (1, 2):
-                    temp_vel = 0
+    def decelerate_waypoints(self, waypoints, closest_idx):
+        temp = []  
+        closest_idx = self.get_closest_waypoint_idx()
+        base_wp_len = len(self.base_waypoints.waypoints)        
+        car_nearwp_dis =  self.distance_wp(self.pose.pose.position,  self.base_waypoints.waypoints[(closest_idx - 1 ) % base_wp_len].pose.pose.position ) \
+                        + self.distance_wp(self.pose.pose.position,  self.base_waypoints.waypoints[(closest_idx + 1 ) % base_wp_len].pose.pose.position )
+        current_prev_dis = self.distance_wp(self.base_waypoints.waypoints[(closest_idx - 1 ) % base_wp_len ].pose.pose.position,  self.base_waypoints.waypoints[closest_idx].pose.pose.position )
+        current_next_dis = self.distance_wp(self.base_waypoints.waypoints[(closest_idx + 1 ) % base_wp_len ].pose.pose.position,  self.base_waypoints.waypoints[closest_idx].pose.pose.position )
 
-                wp_vel = min(wp_vel, temp_vel)
+        if self.red_light_lane_wps: 
+            x = self.pose.pose.position.x
+            y = self.pose.pose.position.y
+            red_light_lane_wps_2d = [[waypoint.pose.pose.position.x , waypoint.pose.pose.position.y] for waypoint in self.red_light_lane_wps]
+            red_light_lane_wps_2d_tree = KDTree(red_light_lane_wps_2d)
+            temp_closest_idx = red_light_lane_wps_2d_tree.query([x, y], 1)[1]
+            for i in range(len(self.red_light_lane_wps)):
+                if i >= temp_closest_idx:
+                    temp.append(self.red_light_lane_wps[i])
 
-            p.twist.twist.linear.x = min(vel, wp_vel)
-            temp.append(p)
+        elif car_nearwp_dis > ( (current_prev_dis + current_next_dis ) * 1.2):            
+            waypoints_array = np.array([[waypoint.pose.pose.position.x , waypoint.pose.pose.position.y] for waypoint in self.base_waypoints.waypoints])       
+            car_x = None # the position x of the car
+            car_y = None # the position y of the car
 
-        return temp
+            if self.pose:
+                car_x = self.pose.pose.position.x
+                car_y = self.pose.pose.position.y
+
+            spline_x = [] # x, use to spline
+            spline_y = [] # y, use to spline
+            spline_x.append(car_x)
+            spline_y.append(car_y)
+            spline_x.extend(waypoints_array[:, 0][(closest_idx + 5) % base_wp_len : max((closest_idx + 8) % base_wp_len, (self.stopline_wp_idx + 6) % base_wp_len) ]) 
+            spline_y.extend(waypoints_array[:, 1][(closest_idx + 5) % base_wp_len : max((closest_idx + 8) % base_wp_len, (self.stopline_wp_idx + 6) % base_wp_len) ])
+            
+            spline_x = np.array(spline_x)
+            spline_y = np.array(spline_y)
+
+            x_new = np.linspace(spline_x.min(),spline_x.max(), 20)
+            y_new = spline(spline_x, spline_y, x_new)
+
+            x_new_len = len(x_new)        
+            vel = max(self.current_vel, self.base_waypoints.waypoints[0].twist.twist.linear.x)
+            for i in range(x_new_len):
+                yaw = 0
+                if i < x_new_len - 1:
+                    dx = x_new[i + 1] - x_new[i]
+                    dy = y_new[i + 1] - y_new[i]
+                    yaw = math.atan2(dy, dx)
+
+                p = Waypoint()
+                p.pose.pose.position.x = float(x_new[i])
+                p.pose.pose.position.y = float(y_new[i])
+                p.pose.pose.position.z = float(0)
+                q = self.quaternion_from_yaw(float(yaw))
+                p.pose.pose.orientation = Quaternion(*q)
+                p.twist.twist.linear.x = float(0)
+
+                temp.append(p)
+
+            light_x = self.base_waypoints.waypoints[self.stopline_wp_idx].pose.pose.position.x
+            light_y = self.base_waypoints.waypoints[self.stopline_wp_idx].pose.pose.position.y
+            temp_wps_2d = [[waypoint.pose.pose.position.x , waypoint.pose.pose.position.y] for waypoint in temp]
+            temp_wps_2d_tree = KDTree(temp_wps_2d)
+            temp_closest_idx = temp_wps_2d_tree.query([light_x, light_y], 1)[1]
+            temp = temp[:temp_closest_idx - 1]
+
+        else:            
+            for i in range(closest_idx , self.stopline_wp_idx - 1):
+                temp.append(copy.deepcopy(self.base_waypoints.waypoints[i]))
+
+        temp_wp = self.decelerate(temp)
+
+        # for debug only
+        # temp_log = []
+        # for i in range(len(temp_wp)):
+        #     temp_log.append([temp_wp[i].pose.pose.position.x , temp_wp[i].pose.pose.position.y, temp_wp[i].twist.twist.linear.x ])        
+        # rospy.loginfo(" %s , --------------------- temp_log : %s ", self.show_how_to, temp_log)
+
+        self.red_light_lane_wps = temp_wp
+        return temp_wp
 
     def pose_cb(self, msg):
         self.pose = msg
@@ -162,12 +231,7 @@ class WaypointUpdater(object):
             self.waypoint_tree = KDTree(self.waypoints_2d)
 
     def traffic_cb(self, msg):
-        # add a red traffic light latency
-        if (self.stopline_wp_idx != -1) and (msg.data == -1) and (self.traffic_cb_count <= 6 ):
-            self.traffic_cb_count += 1
-        else:
-            self.traffic_cb_count = 1
-            self.stopline_wp_idx = msg.data
+        self.stopline_wp_idx = msg.data
 
     def obstacle_cb(self, msg):
         # TODO: Callback for /obstacle_waypoint message. We will implement it later
