@@ -20,8 +20,9 @@ The sections within the video:
 * **bottom right**: simulator 
 
 The following video shows how our code runs a real self driving car with traffic light detection.
-[![Real Sefl-Driving Car](https://img.youtube.com/vi/45m1u2on1YY/0.jpg)](https://www.youtube.com/watch?v=45m1u2on1YY)
+[![Real Sefl-Driving Car](https://img.youtube.com/vi/xhDn3iF3iJQ/0.jpg)](https://www.youtube.com/watch?v=xhDn3iF3iJQ)
 
+The Rosbag and logs are available [here](https://drive.google.com/file/d/1UL4DwgvlfjRLtNcJzsa858LyCSOjyjvA/view?usp=sharing) (3,27GB).
 
 *Note: Find the latest version of this project on
 [Github](https://github.com/markbroerkens/CarND-Capstone).*
